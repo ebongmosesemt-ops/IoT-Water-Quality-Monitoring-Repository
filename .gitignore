@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+results/*.tmp
+data/live_qc_records.jsonl

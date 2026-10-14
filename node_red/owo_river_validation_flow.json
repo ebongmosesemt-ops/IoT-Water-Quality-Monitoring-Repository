@@ -1,0 +1,444 @@
+[
+  {
+    "id": "tab1",
+    "type": "tab",
+    "label": "Owo River QC",
+    "disabled": false,
+    "info": "Reconstructed reference flow based on the study documentation and firmware. Not the original exported production flow."
+  },
+  {
+    "id": "mqttin",
+    "type": "mqtt in",
+    "z": "tab1",
+    "name": "Adafruit IO feeds",
+    "topic": "YOUR_ADAFRUIT_USERNAME/feeds/+",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "broker1",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 140,
+    "y": 100,
+    "wires": [
+      [
+        "normalize"
+      ]
+    ]
+  },
+  {
+    "id": "normalize",
+    "type": "function",
+    "z": "tab1",
+    "name": "Normalize feed message",
+    "func": "const t = String(msg.topic || '');\nconst feed = t.split('/').pop().toLowerCase();\nconst map = {ph:'ph',temperature:'temperature',turbidity:'turbidity',ec:'ec',tds:'tds',do:'do'};\nif (!map[feed]) return null;\nconst v = Number(typeof msg.payload === 'object' && msg.payload !== null && 'value' in msg.payload ? msg.payload.value : msg.payload);\nif (!Number.isFinite(v)) return null;\nmsg.parameter = map[feed];\nmsg.value = v;\nmsg.timestamp = msg.timestamp || new Date().toISOString();\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 340,
+    "y": 100,
+    "wires": [
+      [
+        "assemble"
+      ]
+    ]
+  },
+  {
+    "id": "assemble",
+    "type": "function",
+    "z": "tab1",
+    "name": "Assemble six-parameter hourly record",
+    "func": "const p = msg.parameter;\nconst ts = new Date(msg.timestamp);\nif (!Number.isFinite(ts.getTime())) return null;\nconst hour = new Date(ts); hour.setUTCMinutes(0,0,0);\nconst key = hour.toISOString();\nlet buf = flow.get('hourly_buffer') || {};\nbuf[key] = buf[key] || {created_at:key, values:{}};\nbuf[key].values[p] = msg.value;\nbuf[key].received_at = new Date().toISOString();\nconst required=['ph','temperature','turbidity','ec','tds','do'];\nconst complete=required.every(k=>Number.isFinite(buf[key].values[k]));\nif (!complete) { flow.set('hourly_buffer',buf); return null; }\nif (buf[key].emitted) { flow.set('hourly_buffer',buf); return null; }\nbuf[key].emitted=true;\nconst rec={created_at:key,ph:buf[key].values.ph,temperature:buf[key].values.temperature,turbidity:buf[key].values.turbidity,ec:buf[key].values.ec,tds:buf[key].values.tds,do:buf[key].values.do};\n// Keep only recent buffers.\nconst keys=Object.keys(buf).sort(); if(keys.length>48) delete buf[keys[0]];\nflow.set('hourly_buffer',buf);\nmsg.payload=rec;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 570,
+    "y": 100,
+    "wires": [
+      [
+        "schema"
+      ]
+    ]
+  },
+  {
+    "id": "schema",
+    "type": "function",
+    "z": "tab1",
+    "name": "Schema and completeness check",
+    "func": "const r=msg.payload;\nconst required=['created_at','ph','temperature','turbidity','ec','tds','do'];\nconst missing=required.filter(k=>!(k in r));\nconst nonNumeric=['ph','temperature','turbidity','ec','tds','do'].filter(k=>!Number.isFinite(Number(r[k])));\nif(missing.length||nonNumeric.length){ msg.payload.validation_flag=1; msg.payload.flag_reason=`Schema:${missing.length?`missing=${missing.join(',')}`:''}${nonNumeric.length?` nonnumeric=${nonNumeric.join(',')}`:''}`; }\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 680,
+    "y": 100,
+    "wires": [
+      [
+        "stage1"
+      ]
+    ]
+  },
+  {
+    "id": "stage1",
+    "type": "function",
+    "z": "tab1",
+    "name": "Stage 1 — physical range",
+    "func": "const r=msg.payload;\nconst rules={ph:[0,14],temperature:[0,50],turbidity:[0,3000],ec:[0,5000],tds:[0,5000],do:[0,20]};\nconst reasons=[]; let flag=(r.validation_flag===1)?1:0;\nfor(const [k,[lo,hi]] of Object.entries(rules)){ const v=Number(r[k]); if(!Number.isFinite(v)||v<lo||v>hi){ reasons.push(`Stage1:${k}=${v} OOB[${lo},${hi}]`); flag=1; }}\nr.validation_flag=flag; r.flag_reason=[r.flag_reason,...reasons].filter(Boolean).join('; ')||null;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 780,
+    "y": 100,
+    "wires": [
+      [
+        "stage2"
+      ]
+    ]
+  },
+  {
+    "id": "stage2",
+    "type": "function",
+    "z": "tab1",
+    "name": "Stage 2 — rate of change",
+    "func": "const r=msg.payload;\n// pH, DO and turbidity limits are the values recorded in the deployed validation log (1.5, 3, 500).\n// Temperature, EC and TDS limits are NOT recoverable from the log: the deployed pipeline accepted hourly changes of 2.29, 95.3 and 48.2, so replace these placeholders with the implemented values.\nconst limits={ph:1.5,temperature:2.5,turbidity:500,ec:150,tds:75,do:3};\nconst prev=flow.get('last_complete_record'); const reasons=[];\nif(prev){\n  const dt=(new Date(r.created_at)-new Date(prev.created_at))/3600000;\n  r.temporal_gap_hours=dt;\n  if(dt>=0.5 && dt<=1.5){\n    for(const [k,lim] of Object.entries(limits)){ const d=Math.abs(Number(r[k])-Number(prev[k])); if(Number.isFinite(d)&&d>lim) reasons.push(`Stage2:${k}_ROC=${d.toFixed(3)}>${lim}/hr`); }\n  } else if(dt>1.5){\n    reasons.push(`TemporalGap:${dt.toFixed(1)}h`);\n  }\n}\nif(reasons.some(x=>x.startsWith('Stage2:')) && r.validation_flag!==1) r.validation_flag=2;\nr.flag_reason=[r.flag_reason,...reasons].filter(Boolean).join('; ')||null;\nflow.set('last_complete_record',r);\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 1020,
+    "y": 100,
+    "wires": [
+      [
+        "stage3"
+      ]
+    ]
+  },
+  {
+    "id": "stage3",
+    "type": "function",
+    "z": "tab1",
+    "name": "Stage 3 — inter-parameter consistency",
+    "func": "const r=msg.payload; const reasons=[];\nif(Number(r.tds)>Number(r.ec)) reasons.push(`Stage3:TDS/EC=${(Number(r.tds)/Math.max(Number(r.ec),1e-9)).toFixed(3)} OOB`);\nif(Number(r.ec)===0 && Number(r.tds)>0) reasons.push('Stage3:EC=0 with TDS>0');\nif(reasons.length && r.validation_flag===0) r.validation_flag=2;\nr.flag_reason=[r.flag_reason,...reasons].filter(Boolean).join('; ')||null;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 1280,
+    "y": 100,
+    "wires": [
+      [
+        "stage4buffer"
+      ]
+    ]
+  },
+  {
+    "id": "stage4buffer",
+    "type": "function",
+    "z": "tab1",
+    "name": "Stage 4 — trailing 24-observation window",
+    "func": "// Deployed behaviour (verified against the validation log): the mean and SD are taken over the 24 readings\n// that PRECEDE the current record (current record excluded), so the check is causal and can run online.\nlet h=flow.get('trail24')||[]; const r=msg.payload; const features=['ph','temperature','turbidity','ec','tds','do']; const reasons=[];\nif(h.length>=24){\n  for(const f of features){const vals=h.slice(-24).map(x=>Number(x[f])).filter(Number.isFinite); if(vals.length<2) continue;\n    const mean=vals.reduce((a,b)=>a+b,0)/vals.length; const sd=Math.sqrt(vals.reduce((a,b)=>a+(b-mean)**2,0)/(vals.length-1)); const v=Number(r[f]);\n    if(sd>0 && Math.abs(v-mean)>3*sd) reasons.push(`Stage4:${f}=${v.toFixed(2)} ${(Math.abs(v-mean)/sd).toFixed(1)}σ>3σ mean=${mean.toFixed(2)}`);}\n}\nif(reasons.length && r.validation_flag===0) r.validation_flag=2;\nr.flag_reason=[r.flag_reason,...reasons].filter(Boolean).join('; ')||null;\nh.push({ph:r.ph,temperature:r.temperature,turbidity:r.turbidity,ec:r.ec,tds:r.tds,do:r.do}); if(h.length>48) h=h.slice(-48); flow.set('trail24',h);\nmsg.payload=r; return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 1560,
+    "y": 100,
+    "wires": [
+      [
+        "classify"
+      ]
+    ]
+  },
+  {
+    "id": "classify",
+    "type": "function",
+    "z": "tab1",
+    "name": "Final QC classification",
+    "func": "const r=msg.payload;\nconst c=flow.get('context_by_hour')||{}; const key=new Date(r.created_at); key.setUTCMinutes(0,0,0); const ctx=c[key.toISOString()]||{};\nif(ctx.rainfall_mm_hr!==undefined) r.rainfall_mm_hr=ctx.rainfall_mm_hr;\nif(ctx.maintenance!==undefined) r.maintenance=ctx.maintenance;\nif(ctx.imperfection_type) r.imperfection_type=ctx.imperfection_type;\nconst environmental=Boolean(ctx.environmental_event || r.environmental_event);\nconst artifact=Boolean(r.imperfection_type);\nlet row_qc='VALID';\nif(r.validation_flag===1) row_qc='INVALID_PARAMETER';\nelse if(environmental) row_qc='ENVIRONMENTAL_EVENT';\nelse if(r.validation_flag===2 || artifact) row_qc='SUSPECT';\nr.environmental_event=environmental; r.row_qc=row_qc;\nr.validation_flag=Number.isInteger(r.validation_flag)?r.validation_flag:0;\nr.anomaly_event=false; r.alert=null;\nmsg.payload=r; msg.topic='owo-river/qc/record';\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 1800,
+    "y": 100,
+    "wires": [
+      [
+        "jsonout",
+        "debug",
+        "mqttrecord",
+        "outflag",
+        "outrow",
+        "outevent",
+        "outimp",
+        "outreason",
+        "outrain",
+        "outmaint"
+      ]
+    ]
+  },
+  {
+    "id": "jsonout",
+    "type": "json",
+    "z": "tab1",
+    "name": "JSON",
+    "property": "payload",
+    "action": "str",
+    "pretty": false,
+    "x": 2010,
+    "y": 80,
+    "wires": [
+      [
+        "fileout"
+      ]
+    ]
+  },
+  {
+    "id": "fileout",
+    "type": "file",
+    "z": "tab1",
+    "name": "Append QC records",
+    "filename": "data/live_qc_records.jsonl",
+    "filenameType": "str",
+    "appendNewline": true,
+    "createDir": true,
+    "overwriteFile": "false",
+    "encoding": "utf8",
+    "x": 2220,
+    "y": 80,
+    "wires": []
+  },
+  {
+    "id": "mqttrecord",
+    "type": "mqtt out",
+    "z": "tab1",
+    "name": "Publish QC record",
+    "topic": "owo-river/qc/record",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker1",
+    "x": 2040,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "debug",
+    "type": "debug",
+    "z": "tab1",
+    "name": "QC output",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 2010,
+    "y": 160,
+    "wires": []
+  },
+  {
+    "id": "contextin",
+    "type": "mqtt in",
+    "z": "tab1",
+    "name": "Context / event feed (optional)",
+    "topic": "owo-river/context/+",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "broker1",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 300,
+    "wires": [
+      [
+        "context"
+      ]
+    ]
+  },
+  {
+    "id": "context",
+    "type": "function",
+    "z": "tab1",
+    "name": "Store contextual event metadata",
+    "func": "let c=flow.get('context_by_hour')||{};\nconst p=(typeof msg.payload==='string')?JSON.parse(msg.payload):msg.payload;\nif(!p || !p.created_at) return null;\nconst d=new Date(p.created_at); if(!Number.isFinite(d.getTime())) return null;\nd.setUTCMinutes(0,0,0); const k=d.toISOString();\nc[k]={rainfall_mm_hr:Number.isFinite(Number(p.rainfall_mm_hr))?Number(p.rainfall_mm_hr):null,environmental_event:Boolean(p.environmental_event),maintenance:Boolean(p.maintenance),imperfection_type:p.imperfection_type||null};\nflow.set('context_by_hour',c);\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 410,
+    "y": 300,
+    "wires": []
+  },
+  {
+    "id": "outflag",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish validation_flag",
+    "func": "const v=msg.payload.validation_flag; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/validation_flag'; msg.payload=(typeof v==='boolean')?(v?1:0):(v===null||v===undefined?'':String(v)); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 220,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "outrow",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish row_qc",
+    "func": "const v=msg.payload.row_qc; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/row_qc'; msg.payload=(typeof v==='boolean')?(v?1:0):(v===null||v===undefined?'':String(v)); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 260,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "outevent",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish environmental_event",
+    "func": "const v=msg.payload.environmental_event; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/environmental_event'; msg.payload=(typeof v==='boolean')?(v?1:0):(v===null||v===undefined?'':String(v)); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 300,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "outimp",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish imperfection_type",
+    "func": "const v=msg.payload.imperfection_type; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/imperfection_type'; msg.payload=(typeof v==='boolean')?(v?1:0):(v===null||v===undefined?'':String(v)); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 340,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "mqttqc",
+    "type": "mqtt out",
+    "z": "tab1",
+    "name": "Publish QC metadata",
+    "topic": "",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker1",
+    "x": 2250,
+    "y": 300,
+    "wires": []
+  },
+  {
+    "id": "outreason",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish flag_reason",
+    "func": "const v=msg.payload.flag_reason; if(v===undefined || v===null) return null; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/flag_reason'; msg.payload=(typeof v==='boolean')?(v?1:0):String(v); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 390,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "outrain",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish rainfall_mm_hr",
+    "func": "const v=msg.payload.rainfall_mm_hr; if(v===undefined || v===null) return null; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/rainfall_mm_hr'; msg.payload=(typeof v==='boolean')?(v?1:0):String(v); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 430,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "outmaint",
+    "type": "function",
+    "z": "tab1",
+    "name": "Publish maintenance",
+    "func": "const v=msg.payload.maintenance; if(v===undefined || v===null) return null; msg.topic='YOUR_ADAFRUIT_USERNAME/feeds/maintenance'; msg.payload=(typeof v==='boolean')?(v?1:0):String(v); return msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "x": 2020,
+    "y": 470,
+    "wires": [
+      [
+        "mqttqc"
+      ]
+    ]
+  },
+  {
+    "id": "broker1",
+    "type": "mqtt-broker",
+    "name": "Adafruit IO — configure credentials",
+    "broker": "io.adafruit.com",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": "",
+    "credentials": {
+      "user": "YOUR_ADAFRUIT_USERNAME",
+      "password": "YOUR_ADAFRUIT_IO_KEY"
+    }
+  }
+]

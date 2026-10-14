@@ -1,0 +1,23 @@
+{
+  "raw_shape": [
+    1801,
+    17
+  ],
+  "cleaned_shape": [
+    1801,
+    31
+  ],
+  "chronology": {
+    "start_utc": "2026-06-08T08:00:00+00:00",
+    "end_utc": "2026-08-23T23:00:00+00:00",
+    "expected_hourly_records": 1840,
+    "received_records": 1801,
+    "completeness_percent": 97.8804347826087
+  },
+  "row_qc_counts": {
+    "VALID": 1289,
+    "SUSPECT": 327,
+    "ENVIRONMENTAL_EVENT": 142,
+    "INVALID_PARAMETER": 43
+  }
+}

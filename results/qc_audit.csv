@@ -1,0 +1,15 @@
+parameter,rule,lower,upper,violations,percent
+value_ph,range,0.0,14.0,1,0.0555247084952804
+value_temperature_c,range,0.0,50.0,1,0.0555247084952804
+value_turbidity_ntu,range,0.0,3000.0,0,0.0
+value_ec_uscm,range,0.0,5000.0,0,0.0
+value_tds_mgl,range,0.0,5000.0,0,0.0
+value_do_mgl,range,0.0,20.0,0,0.0
+value_ph,rate_of_change_audit,,0.5,38,2.109938922820655
+value_temperature_c,rate_of_change_audit,,2.0,10,0.555247084952804
+value_turbidity_ntu,rate_of_change_audit,,50.0,41,2.2765130483064966
+value_ec_uscm,rate_of_change_audit,,150.0,14,0.7773459189339256
+value_tds_mgl,rate_of_change_audit,,75.0,15,0.832870627429206
+value_do_mgl,rate_of_change_audit,,3.0,6,0.3331482509716824
+TDS_vs_EC,tds_gt_ec,,,1,0.0555247084952804
+EC_vs_TDS,zero_ec_positive_tds,,,0,0.0
